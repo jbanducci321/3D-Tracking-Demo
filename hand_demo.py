@@ -1,9 +1,10 @@
 """
-Proof-of-concept: track one hand via webcam (MediaPipe) and mirror the
-21 landmark points onto a simple wireframe "rig" (VPython spheres + cylinders).
+Proof-of-concept: track up to two hands via webcam (MediaPipe) and mirror
+the 21 landmark points per hand onto simple wireframe "rigs" (VPython
+spheres + cylinders). Each rig only appears once its hand is detected.
 
 Controls:
-  - Show one hand to the webcam.
+  - Show one or two hands to the webcam.
   - Press 'q' in the webcam window to quit.
 """
 
@@ -29,16 +30,30 @@ HAND_CONNECTIONS = [
 ]
 
 SCALE = 20  # world units across the normalized [0,1] landmark range
+NUM_HANDS = 2
+JOINT_COLORS = [color.orange, color.cyan]  # one color per hand slot
 
 
-def build_rig():
-    scene = canvas(title="Hand Rig", width=800, height=600, background=color.black)
-    joints = [sphere(canvas=scene, pos=vector(0, 0, 0), radius=0.4, color=color.orange)
+def build_rig(scene, joint_color):
+    joints = [sphere(canvas=scene, pos=vector(0, 0, 0), radius=0.4, color=joint_color,
+                      visible=False)
               for _ in range(21)]
     bones = [cylinder(canvas=scene, pos=vector(0, 0, 0), axis=vector(0, 0, 0),
-                       radius=0.15, color=color.white)
+                       radius=0.15, color=color.white, visible=False)
               for _ in HAND_CONNECTIONS]
     return joints, bones
+
+
+def build_rigs(num_hands):
+    scene = canvas(title="Hand Rig", width=800, height=600, background=color.black)
+    return [build_rig(scene, JOINT_COLORS[i % len(JOINT_COLORS)]) for i in range(num_hands)]
+
+
+def set_rig_visible(joints, bones, visible):
+    for joint in joints:
+        joint.visible = visible
+    for bone in bones:
+        bone.visible = visible
 
 
 def landmark_to_vector(landmark):
@@ -55,9 +70,11 @@ def update_rig(joints, bones, landmarks):
     positions = [landmark_to_vector(lm) for lm in landmarks]
     for joint, pos in zip(joints, positions):
         joint.pos = pos
+        joint.visible = True
     for bone, (i, j) in zip(bones, HAND_CONNECTIONS):
         bone.pos = positions[i]
         bone.axis = positions[j] - positions[i]
+        bone.visible = True
 
 
 def draw_landmarks_on_frame(frame, landmarks):
@@ -78,11 +95,11 @@ def main():
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
         running_mode=RunningMode.VIDEO,
-        num_hands=1,
+        num_hands=NUM_HANDS,
     )
     landmarker = HandLandmarker.create_from_options(options)
 
-    joints, bones = build_rig()
+    rigs = build_rigs(NUM_HANDS)
 
     start_time = time.time()
 
@@ -100,11 +117,15 @@ def main():
             timestamp_ms = int((time.time() - start_time) * 1000)
 
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            detected_hands = result.hand_landmarks
 
-            if result.hand_landmarks:
-                landmarks = result.hand_landmarks[0]
-                update_rig(joints, bones, landmarks)
-                draw_landmarks_on_frame(frame, landmarks)
+            for i, (joints, bones) in enumerate(rigs):
+                if i < len(detected_hands):
+                    landmarks = detected_hands[i]
+                    update_rig(joints, bones, landmarks)
+                    draw_landmarks_on_frame(frame, landmarks)
+                else:
+                    set_rig_visible(joints, bones, False)
 
             cv2.imshow("Webcam (press q to quit)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
