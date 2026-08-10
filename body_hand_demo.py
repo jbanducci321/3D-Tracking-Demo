@@ -4,9 +4,15 @@ two independent MediaPipe models (Pose + Hand Landmarker) fed the same
 frame, and mirror both onto shared VPython wireframe "rigs".
 
 Body and hand landmarks are both normalized (x, y) fractions of the same
-webcam frame, so they share one coordinate space already -- no manual
-alignment between the two models is needed, we just scale both the same
-way (see landmark_to_vector).
+webcam frame, so they share one coordinate space already -- we scale both
+the same way (see landmark_to_vector). But the two models still disagree
+slightly on exactly where each wrist is (independent detectors, and their
+z-depth is relative to different anchors -- hand z is relative to that
+hand's own wrist, pose z is relative to the hips), so plotting each
+model's raw output makes the hand rigs look detached from the body rig.
+To fix that, each hand's wrist joint is snapped onto the body rig's
+matching wrist landmark (see anchor_hand_positions) -- the hand model only
+contributes finger *shape*, the body model contributes *position*.
 
 Controls:
   - Stand in front of the webcam; show one or two hands.
@@ -44,6 +50,9 @@ HAND_CONNECTIONS = [
 # Official 33-landmark body skeleton connections, straight from MediaPipe.
 POSE_CONNECTIONS = [(c.start, c.end) for c in PoseLandmarksConnections.POSE_LANDMARKS]
 
+# MediaPipe's 33-point pose topology: indices of the two wrist landmarks.
+POSE_WRIST_INDEX = {"Left": 15, "Right": 16}
+
 # Physical size (in world units) the wider of the frame's two dimensions
 # should map to, shared by both models so hands and body stay in scale
 # with each other (see body_demo.py for why this beats a flat SCALE).
@@ -75,6 +84,14 @@ def set_rig_visible(joints, bones, visible):
         joint.visible = visible
     for bone in bones:
         bone.visible = visible
+
+
+def anchor_hand_positions(hand_positions, wrist_anchor):
+    # hand_positions[0] is the hand model's own idea of where the wrist is.
+    # Re-center the whole hand shape on that wrist, then shift it onto the
+    # body model's wrist position instead, so the two rigs meet exactly.
+    hand_wrist = hand_positions[0]
+    return [wrist_anchor + (pos - hand_wrist) for pos in hand_positions]
 
 
 def update_rig(joints, bones, positions, connections):
@@ -148,20 +165,28 @@ def main():
             pose_result = pose_landmarker.detect_for_video(mp_image, timestamp_ms)
             hand_result = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
 
+            wrist_anchors = {}
             if pose_result.pose_landmarks:
                 landmarks = pose_result.pose_landmarks[0]
                 positions = [landmark_to_vector(lm, frame_w, frame_h) for lm in landmarks]
                 update_rig(pose_joints, pose_bones, positions, POSE_CONNECTIONS)
                 draw_landmarks_on_frame(frame, landmarks, POSE_CONNECTIONS,
                                          line_color=(0, 255, 0), point_color=(0, 0, 255))
+                wrist_anchors = {side: positions[idx] for side, idx in POSE_WRIST_INDEX.items()}
             else:
                 set_rig_visible(pose_joints, pose_bones, False)
 
             detected_hands = hand_result.hand_landmarks
+            detected_handedness = hand_result.handedness
             for i, (joints, bones) in enumerate(hand_rigs):
                 if i < len(detected_hands):
                     landmarks = detected_hands[i]
                     positions = [landmark_to_vector(lm, frame_w, frame_h) for lm in landmarks]
+
+                    side = detected_handedness[i][0].category_name if i < len(detected_handedness) else None
+                    if side in wrist_anchors:
+                        positions = anchor_hand_positions(positions, wrist_anchors[side])
+
                     update_rig(joints, bones, positions, HAND_CONNECTIONS)
                     draw_landmarks_on_frame(frame, landmarks, HAND_CONNECTIONS,
                                              line_color=(255, 0, 0), point_color=(0, 255, 255))
