@@ -50,8 +50,20 @@ HAND_CONNECTIONS = [
 # Official 33-landmark body skeleton connections, straight from MediaPipe.
 POSE_CONNECTIONS = [(c.start, c.end) for c in PoseLandmarksConnections.POSE_LANDMARKS]
 
-# MediaPipe's 33-point pose topology: indices of the two wrist landmarks.
+# MediaPipe's 33-point pose topology: indices of the wrist/elbow landmarks.
 POSE_WRIST_INDEX = {"Left": 15, "Right": 16}
+POSE_ELBOW_INDEX = {"Left": 13, "Right": 14}
+
+# MediaPipe's 21-point hand topology: wrist and middle-finger-base indices,
+# used as a stable "palm length" reference for rescaling (see hand_to_forearm_scale).
+HAND_WRIST_INDEX = 0
+HAND_MIDDLE_MCP_INDEX = 9
+
+# Rough real-world ratio of palm length (wrist to middle-finger base) to
+# forearm length (elbow to wrist), used to size hands relative to the body
+# instead of relative to how close the hand happens to be to the camera.
+# Tune this by eye if hands still look too big/small.
+HAND_TO_FOREARM_RATIO = 0.35
 
 # Physical size (in world units) the wider of the frame's two dimensions
 # should map to, shared by both models so hands and body stay in scale
@@ -67,6 +79,10 @@ def landmark_to_vector(landmark, frame_w, frame_h):
     y = -(landmark.y - 0.5) * frame_h * unit
     z = -landmark.z * frame_w * unit
     return vector(x, y, z)
+
+
+def distance(a, b):
+    return (a - b).mag
 
 
 def make_rig(scene, num_joints, connections, joint_color, bone_color, joint_radius, bone_radius):
@@ -86,12 +102,24 @@ def set_rig_visible(joints, bones, visible):
         bone.visible = visible
 
 
-def anchor_hand_positions(hand_positions, wrist_anchor):
+def hand_to_forearm_scale(hand_positions, forearm_length):
+    # The hand model's apparent size only reflects how close that hand is
+    # to the camera, not its real size relative to the body. Rescale it so
+    # its palm length matches a plausible fraction of this arm's own
+    # (body-model-measured) forearm length instead.
+    palm_length = distance(hand_positions[HAND_WRIST_INDEX], hand_positions[HAND_MIDDLE_MCP_INDEX])
+    if palm_length < 1e-6:
+        return 1.0
+    return (forearm_length * HAND_TO_FOREARM_RATIO) / palm_length
+
+
+def anchor_hand_positions(hand_positions, wrist_anchor, scale=1.0):
     # hand_positions[0] is the hand model's own idea of where the wrist is.
-    # Re-center the whole hand shape on that wrist, then shift it onto the
-    # body model's wrist position instead, so the two rigs meet exactly.
+    # Re-center the whole hand shape on that wrist, rescale it, then shift
+    # it onto the body model's wrist position instead, so the two rigs
+    # meet exactly and at a consistent, body-relative size.
     hand_wrist = hand_positions[0]
-    return [wrist_anchor + (pos - hand_wrist) for pos in hand_positions]
+    return [wrist_anchor + (pos - hand_wrist) * scale for pos in hand_positions]
 
 
 def update_rig(joints, bones, positions, connections):
@@ -166,6 +194,7 @@ def main():
             hand_result = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
 
             wrist_anchors = {}
+            forearm_lengths = {}
             if pose_result.pose_landmarks:
                 landmarks = pose_result.pose_landmarks[0]
                 positions = [landmark_to_vector(lm, frame_w, frame_h) for lm in landmarks]
@@ -173,6 +202,10 @@ def main():
                 draw_landmarks_on_frame(frame, landmarks, POSE_CONNECTIONS,
                                          line_color=(0, 255, 0), point_color=(0, 0, 255))
                 wrist_anchors = {side: positions[idx] for side, idx in POSE_WRIST_INDEX.items()}
+                forearm_lengths = {
+                    side: distance(positions[POSE_ELBOW_INDEX[side]], positions[idx])
+                    for side, idx in POSE_WRIST_INDEX.items()
+                }
             else:
                 set_rig_visible(pose_joints, pose_bones, False)
 
@@ -185,7 +218,8 @@ def main():
 
                     side = detected_handedness[i][0].category_name if i < len(detected_handedness) else None
                     if side in wrist_anchors:
-                        positions = anchor_hand_positions(positions, wrist_anchors[side])
+                        scale = hand_to_forearm_scale(positions, forearm_lengths[side])
+                        positions = anchor_hand_positions(positions, wrist_anchors[side], scale)
 
                     update_rig(joints, bones, positions, HAND_CONNECTIONS)
                     draw_landmarks_on_frame(frame, landmarks, HAND_CONNECTIONS,
