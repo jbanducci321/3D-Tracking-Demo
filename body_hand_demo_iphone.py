@@ -1,21 +1,22 @@
 """
-Proof-of-concept: track a full body AND up to two hands via webcam, using
-two independent MediaPipe models (Pose + Hand Landmarker) fed the same
-frame, and mirror both onto shared VPython wireframe "rigs".
+Same body + hand tracking demo as body_hand_demo.py, but pointed at an
+iPhone used as a webcam instead of a built-in/USB webcam.
 
-Body and hand landmarks are both normalized (x, y) fractions of the same
-webcam frame, so they share one coordinate space already -- we scale both
-the same way (see landmark_to_vector). But the two models still disagree
-slightly on exactly where each wrist is (independent detectors, and their
-z-depth is relative to different anchors -- hand z is relative to that
-hand's own wrist, pose z is relative to the hips), so plotting each
-model's raw output makes the hand rigs look detached from the body rig.
-To fix that, each hand's wrist joint is snapped onto the body rig's
-matching wrist landmark (see anchor_hand_positions) -- the hand model only
-contributes finger *shape*, the body model contributes *position*.
+IMPORTANT: plugging an iPhone into Windows over USB is NOT enough by
+itself -- Windows only sees it as a file-transfer device, not a camera.
+You need a bridge app running that exposes the phone as a virtual webcam
+(e.g. Camo, iVCam, EpocCam). Once that's running, the phone shows up to
+Windows as an ordinary camera device, just at a different index than
+whatever OpenCV's default index 0 normally opens.
+
+There's no reliable way to know that index in advance -- it depends on
+which bridge app you used and what else is plugged in. Set CAMERA_INDEX
+below and try running this; if it can't open that index (or opens the
+wrong camera), it will list every camera index it can actually read a
+frame from so you can pick the right one.
 
 Controls:
-  - Stand in front of the webcam; show one or two hands.
+  - Stand in front of the iPhone; show one or two hands.
   - Press 'q' in the webcam window to quit.
 """
 
@@ -31,6 +32,13 @@ from mediapipe.tasks.python.vision import (
     PoseLandmarksConnections, RunningMode,
 )
 from vpython import canvas, sphere, cylinder, vector, rate, color
+
+# Index of the camera device to open. 0 is usually a laptop's built-in
+# webcam -- once your iPhone bridge app (Camo/iVCam/EpocCam/etc.) is
+# running, the phone will likely show up as 1, 2, or higher. If this is
+# wrong, this script will list working indices for you on startup.
+CAMERA_INDEX = 1
+CAMERA_PROBE_RANGE = range(5)  # indices to check when CAMERA_INDEX fails
 
 HAND_MODEL_PATH = "hand_landmarker.task"
 POSE_MODEL_PATH = "pose_landmarker_lite.task"
@@ -85,6 +93,41 @@ POSE_EVERY_N_FRAMES = 2
 WORLD_SIZE = 20
 
 HAND_JOINT_COLORS = [color.cyan, color.magenta]  # one per hand slot
+
+
+def find_working_camera_indices(max_index):
+    working = []
+    for i in range(max_index):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ok, frame = cap.read()
+            if ok:
+                h, w = frame.shape[:2]
+                working.append((i, w, h))
+        cap.release()
+    return working
+
+
+def open_camera(preferred_index, probe_range):
+    cap = cv2.VideoCapture(preferred_index)
+    if cap.isOpened():
+        ok, _ = cap.read()
+        if ok:
+            return cap
+        cap.release()
+
+    print(f"Could not read frames from camera index {preferred_index}.")
+    print("Checking other camera indices...")
+    working = find_working_camera_indices(max(probe_range) + 1 if probe_range else 5)
+    if not working:
+        print("No camera indices produced a readable frame. Is your iPhone's")
+        print("bridge app (Camo/iVCam/EpocCam/etc.) actually running?")
+    else:
+        print("Found working camera(s):")
+        for idx, w, h in working:
+            print(f"  index {idx}: {w}x{h}")
+        print("Update CAMERA_INDEX at the top of this file to the one that's your iPhone.")
+    return None
 
 
 def landmark_to_vector(landmark, frame_w, frame_h):
@@ -163,9 +206,8 @@ def draw_landmarks_on_frame(frame, landmarks, connections, line_color, point_col
 
 
 def main():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Could not open webcam.")
+    cap = open_camera(CAMERA_INDEX, CAMERA_PROBE_RANGE)
+    if cap is None:
         sys.exit(1)
 
     pose_landmarker = PoseLandmarker.create_from_options(PoseLandmarkerOptions(
@@ -179,7 +221,7 @@ def main():
         num_hands=NUM_HANDS,
     ))
 
-    scene = canvas(title="Body + Hand Rig", width=800, height=600, background=color.black)
+    scene = canvas(title="Body + Hand Rig (iPhone camera)", width=800, height=600, background=color.black)
 
     pose_joints, pose_bones = make_rig(
         scene, num_joints=33, connections=POSE_CONNECTIONS,
@@ -273,7 +315,7 @@ def main():
             cv2.putText(frame, f"FPS: {fps_ema:.1f}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-            cv2.imshow("Webcam (press q to quit)", frame)
+            cv2.imshow("iPhone camera (press q to quit)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
